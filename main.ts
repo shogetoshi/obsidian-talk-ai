@@ -8,6 +8,11 @@ const DEFAULT_SETTINGS: TalkAISettings = {
 	openAIApiKey: '' // ここにAPIキーを設定してください
 }
 
+interface ConversationMessage {
+	role: 'user' | 'assistant';
+	content: string;
+}
+
 export default class TalkAIPlugin extends Plugin {
 	settings: TalkAISettings;
 
@@ -47,18 +52,38 @@ export default class TalkAIPlugin extends Plugin {
 			return;
 		}
 
-		// 現在のエディタの内容を質問として読み込み
-		const question = editor.getValue();
+		// エディタの内容を解析して会話履歴と新しい質問を抽出
+		const content = editor.getValue();
+		const { history, newQuestion } = this.parseConversation(content);
 
-		// 質問が空の場合はエラー
-		if (!question || question.trim() === '') {
+		// 新しい質問が空の場合はエラー
+		if (!newQuestion || newQuestion.trim() === '') {
 			new Notice('質問を入力してください');
 			return;
 		}
 
 		// エディタの内容を新しいフォーマットで書き換え
-		const formattedQuestion = `# Q\n${question}\n\n---\n\n# A\n`;
-		editor.setValue(formattedQuestion);
+		let formattedContent = '';
+
+		// 会話履歴が存在する場合は、履歴を保持
+		if (history.length > 0) {
+			// 既存の会話履歴をフォーマットして保持
+			for (let i = 0; i < history.length; i++) {
+				const msg = history[i];
+				if (msg.role === 'user') {
+					formattedContent += `# Q\n${msg.content}\n\n---\n\n`;
+				} else {
+					formattedContent += `# A\n${msg.content}\n\n---\n\n`;
+				}
+			}
+			// 新しい質問を追加
+			formattedContent += `# Q\n${newQuestion}\n\n---\n\n# A\n`;
+		} else {
+			// 会話履歴がない場合は新規フォーマット
+			formattedContent = `# Q\n${newQuestion}\n\n---\n\n# A\n`;
+		}
+
+		editor.setValue(formattedContent);
 
 		// 回答の開始位置を取得 (最終行)
 		const lastLine = editor.lastLine();
@@ -69,7 +94,7 @@ export default class TalkAIPlugin extends Plugin {
 			new Notice('AIに問い合わせ中...');
 
 			// OpenAI APIを使用してストリーミングで回答を取得
-			await this.streamOpenAIResponse(editor, answerStartLine, question);
+			await this.streamOpenAIResponse(editor, answerStartLine, history, newQuestion);
 
 			new Notice('回答が完了しました');
 		} catch (error) {
@@ -79,7 +104,90 @@ export default class TalkAIPlugin extends Plugin {
 		}
 	}
 
-	async streamOpenAIResponse(editor: Editor, startLine: number, question: string) {
+	/**
+	 * エディタの内容を解析してQ&A履歴と新しい質問を抽出する
+	 */
+	private parseConversation(content: string): { history: ConversationMessage[], newQuestion: string } {
+		const history: ConversationMessage[] = [];
+		let newQuestion = '';
+
+		// # Q と # A で分割する正規表現パターン
+		// 行頭の # Q または # A でセクションを区切る
+		const sections = content.split(/^# (Q|A)$/m);
+
+		// sections[0]: 最初の # Q より前の内容 (通常は空)
+		// sections[1]: 'Q' または 'A'
+		// sections[2]: その内容
+		// sections[3]: 'Q' または 'A'
+		// sections[4]: その内容
+		// ... の繰り返し
+
+		let isLastQuestion = false;
+
+		for (let i = 1; i < sections.length; i += 2) {
+			const type = sections[i]; // 'Q' または 'A'
+			const sectionContent = sections[i + 1]?.trim() || '';
+
+			// --- の区切り線を除去
+			const cleanContent = sectionContent.replace(/^---\s*/m, '').trim();
+
+			if (!cleanContent) {
+				// 最後の # Q で内容が空の場合は、これから質問を入力する場所
+				if (type === 'Q' && i === sections.length - 1) {
+					isLastQuestion = true;
+				}
+				continue;
+			}
+
+			if (type === 'Q') {
+				// 最後の Q セクションの場合、これが新しい質問
+				if (i >= sections.length - 2) {
+					// 最後のセクションまたは最後から2番目(最後が空のAの場合)
+					// 次のセクションをチェック
+					const nextType = sections[i + 2];
+					if (!nextType || nextType === 'Q') {
+						// 次のセクションがない、またはQの場合 = まだ回答されていない
+						newQuestion = cleanContent;
+						isLastQuestion = true;
+						continue;
+					}
+				}
+				history.push({ role: 'user', content: cleanContent });
+			} else if (type === 'A') {
+				// # Q の後の内容が新しい質問として検出されていない場合のみ履歴に追加
+				if (!isLastQuestion) {
+					history.push({ role: 'assistant', content: cleanContent });
+				}
+			}
+		}
+
+		// エディタの内容全体が # Q や # A を含まない場合
+		// 全体を新しい質問として扱う
+		if (history.length === 0 && !newQuestion) {
+			newQuestion = content.trim();
+		}
+
+		return { history, newQuestion };
+	}
+
+	async streamOpenAIResponse(
+		editor: Editor,
+		startLine: number,
+		history: ConversationMessage[],
+		newQuestion: string
+	) {
+		// 会話履歴をOpenAI API形式のmessages配列に変換
+		const messages = [
+			...history.map(msg => ({
+				role: msg.role,
+				content: msg.content
+			})),
+			{
+				role: 'user' as const,
+				content: newQuestion
+			}
+		];
+
 		const response = await fetch('https://api.openai.com/v1/chat/completions', {
 			method: 'POST',
 			headers: {
@@ -88,12 +196,7 @@ export default class TalkAIPlugin extends Plugin {
 			},
 			body: JSON.stringify({
 				model: 'gpt-4',
-				messages: [
-					{
-						role: 'user',
-						content: question
-					}
-				],
+				messages: messages,
 				stream: true
 			})
 		});
@@ -151,6 +254,12 @@ export default class TalkAIPlugin extends Plugin {
 					}
 				}
 			}
+
+			// ストリーミング完了後、次の質問を促すために # Q を追加
+			editor.replaceRange(
+				'\n\n---\n\n# Q\n',
+				{ line: currentLine, ch: editor.getLine(currentLine).length }
+			);
 		} finally {
 			reader.releaseLock();
 		}
