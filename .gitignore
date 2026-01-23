@@ -1,0 +1,32 @@
+data.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+
+# Dependencies
+node_modules/
+
+# Optional npm cache
+.npm
+
+# Build output
+main.js
+main.js.map
+*.js.map
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

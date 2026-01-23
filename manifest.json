@@ -1,0 +1,10 @@
+{
+	"id": "obsidian-talk-ai",
+	"name": "Talk AI",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "OpenAI APIを使用してAIとの会話を実現するプラグイン",
+	"author": "Your Name",
+	"authorUrl": "",
+	"isDesktopOnly": false
+}
