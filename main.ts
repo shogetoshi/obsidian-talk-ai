@@ -47,22 +47,29 @@ export default class TalkAIPlugin extends Plugin {
 			return;
 		}
 
-		// 固定の質問
-		const question = '10000までの素数を計算するプログラム書いて';
+		// 現在のエディタの内容を質問として読み込み
+		const question = editor.getValue();
 
-		// 質問をエディタに追加
-		const currentCursor = editor.getCursor();
-		editor.replaceRange(`\n\n**質問:** ${question}\n\n**回答:**\n`, currentCursor);
+		// 質問が空の場合はエラー
+		if (!question || question.trim() === '') {
+			new Notice('質問を入力してください');
+			return;
+		}
 
-		// 回答の開始位置を取得
-		const answerStartLine = currentCursor.line + 4;
-		editor.setCursor({ line: answerStartLine, ch: 0 });
+		// エディタの内容を新しいフォーマットで書き換え
+		const formattedQuestion = `# Q\n${question}\n\n---\n\n# A\n`;
+		editor.setValue(formattedQuestion);
+
+		// 回答の開始位置を取得 (最終行)
+		const lastLine = editor.lastLine();
+		const answerStartLine = lastLine;
+		editor.setCursor({ line: answerStartLine, ch: editor.getLine(answerStartLine).length });
 
 		try {
 			new Notice('AIに問い合わせ中...');
 
 			// OpenAI APIを使用してストリーミングで回答を取得
-			await this.streamOpenAIResponse(editor, answerStartLine);
+			await this.streamOpenAIResponse(editor, answerStartLine, question);
 
 			new Notice('回答が完了しました');
 		} catch (error) {
@@ -72,7 +79,7 @@ export default class TalkAIPlugin extends Plugin {
 		}
 	}
 
-	async streamOpenAIResponse(editor: Editor, startLine: number) {
+	async streamOpenAIResponse(editor: Editor, startLine: number, question: string) {
 		const response = await fetch('https://api.openai.com/v1/chat/completions', {
 			method: 'POST',
 			headers: {
@@ -84,7 +91,7 @@ export default class TalkAIPlugin extends Plugin {
 				messages: [
 					{
 						role: 'user',
-						content: '10000までの素数を計算するプログラム書いて'
+						content: question
 					}
 				],
 				stream: true
