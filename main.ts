@@ -2,11 +2,18 @@ import { App, Editor, MarkdownView, Plugin, PluginSettingTab, Setting, Notice } 
 
 interface TalkAISettings {
 	openAIApiKey: string;
+	aiModel: string;
+	systemPrompt: string;
 }
 
 const DEFAULT_SETTINGS: TalkAISettings = {
-	openAIApiKey: '' // ここにAPIキーを設定してください
+	openAIApiKey: '', // ここにAPIキーを設定してください
+	aiModel: 'gpt-5.2', // デフォルトは gpt-5.2
+	systemPrompt: '' // デフォルトは空
 }
+
+// モデルオプションの型定義
+type ModelOptions = Record<string, string>;
 
 interface ConversationMessage {
 	role: 'user' | 'assistant';
@@ -15,9 +22,11 @@ interface ConversationMessage {
 
 export default class TalkAIPlugin extends Plugin {
 	settings: TalkAISettings;
+	modelOptions: ModelOptions = {};
 
 	async onload() {
 		await this.loadSettings();
+		await this.loadModelOptions();
 
 		// リボンアイコンを追加
 		const ribbonIconEl = this.addRibbonIcon('message-square', 'Talk AI', async (evt: MouseEvent) => {
@@ -176,17 +185,27 @@ export default class TalkAIPlugin extends Plugin {
 		history: ConversationMessage[],
 		newQuestion: string
 	) {
-		// 会話履歴をOpenAI API形式のmessages配列に変換
-		const messages = [
-			...history.map(msg => ({
-				role: msg.role,
-				content: msg.content
-			})),
-			{
-				role: 'user' as const,
-				content: newQuestion
-			}
-		];
+		// システムプロンプトがある場合は先頭に追加
+		const messages: Array<{role: 'system' | 'user' | 'assistant', content: string}> = [];
+
+		if (this.settings.systemPrompt && this.settings.systemPrompt.trim() !== '') {
+			messages.push({
+				role: 'system',
+				content: this.settings.systemPrompt
+			});
+		}
+
+		// 会話履歴を追加
+		messages.push(...history.map(msg => ({
+			role: msg.role,
+			content: msg.content
+		})));
+
+		// 新しい質問を追加
+		messages.push({
+			role: 'user',
+			content: newQuestion
+		});
 
 		const response = await fetch('https://api.openai.com/v1/chat/completions', {
 			method: 'POST',
@@ -195,7 +214,7 @@ export default class TalkAIPlugin extends Plugin {
 				'Authorization': `Bearer ${this.settings.openAIApiKey}`
 			},
 			body: JSON.stringify({
-				model: 'gpt-4',
+				model: this.settings.aiModel, // 設定から動的に取得
 				messages: messages,
 				stream: true
 			})
@@ -272,6 +291,25 @@ export default class TalkAIPlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
+
+	async loadModelOptions() {
+		try {
+			const adapter = this.app.vault.adapter;
+			const pluginDir = this.manifest.dir;
+			if (pluginDir) {
+				const filePath = `${pluginDir}/modelOptions.json`;
+				const content = await adapter.read(filePath);
+				this.modelOptions = JSON.parse(content);
+			}
+		} catch (error) {
+			console.error('Failed to load modelOptions.json:', error);
+			// デフォルトのモデルオプションを設定
+			this.modelOptions = {
+				'gpt-5.2': 'gpt-5.2',
+				'gpt-5.2-pro': 'gpt-5.2-pro'
+			};
+		}
+	}
 }
 
 class TalkAISettingTab extends PluginSettingTab {
@@ -289,6 +327,7 @@ class TalkAISettingTab extends PluginSettingTab {
 
 		containerEl.createEl('h2', {text: 'Talk AI 設定'});
 
+		// APIキー設定
 		new Setting(containerEl)
 			.setName('OpenAI APIキー')
 			.setDesc('OpenAIのAPIキーを入力してください (https://platform.openai.com/api-keys で取得できます)')
@@ -299,5 +338,43 @@ class TalkAISettingTab extends PluginSettingTab {
 					this.plugin.settings.openAIApiKey = value;
 					await this.plugin.saveSettings();
 				}));
+
+		// AIモデル選択
+		new Setting(containerEl)
+			.setName('AIモデル')
+			.setDesc('使用するAIモデルを選択してください')
+			.addDropdown(dropdown => {
+				// modelOptions.json から選択肢を追加
+				for (const [value, label] of Object.entries(this.plugin.modelOptions)) {
+					dropdown.addOption(value, label);
+				}
+
+				// 現在の値を設定
+				dropdown.setValue(this.plugin.settings.aiModel);
+
+				// 変更時の処理
+				dropdown.onChange(async (value) => {
+					this.plugin.settings.aiModel = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		// システムプロンプト設定
+		new Setting(containerEl)
+			.setName('システムプロンプト')
+			.setDesc('AIの動作を制御するシステムプロンプトを設定できます')
+			.addTextArea(text => {
+				text
+					.setPlaceholder('例: あなたは親切で知識豊富なアシスタントです。')
+					.setValue(this.plugin.settings.systemPrompt)
+					.onChange(async (value) => {
+						this.plugin.settings.systemPrompt = value;
+						await this.plugin.saveSettings();
+					});
+
+				// テキストエリアのスタイル調整
+				text.inputEl.rows = 4;
+				text.inputEl.cols = 50;
+			});
 	}
 }
