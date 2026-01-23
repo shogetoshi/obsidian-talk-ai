@@ -8,15 +8,12 @@ interface TalkAISettings {
 
 const DEFAULT_SETTINGS: TalkAISettings = {
 	openAIApiKey: '', // ここにAPIキーを設定してください
-	aiModel: 'gpt5.2', // デフォルトは gpt5.2
+	aiModel: 'gpt-5.2', // デフォルトは gpt-5.2
 	systemPrompt: '' // デフォルトは空
 }
 
-// AIモデル選択肢
-const AI_MODELS = [
-	{ value: 'gpt5.2', label: 'GPT-5.2' },
-	{ value: 'gpt5.1', label: 'GPT-5.1' }
-] as const;
+// モデルオプションの型定義
+type ModelOptions = Record<string, string>;
 
 interface ConversationMessage {
 	role: 'user' | 'assistant';
@@ -25,9 +22,11 @@ interface ConversationMessage {
 
 export default class TalkAIPlugin extends Plugin {
 	settings: TalkAISettings;
+	modelOptions: ModelOptions = {};
 
 	async onload() {
 		await this.loadSettings();
+		await this.loadModelOptions();
 
 		// リボンアイコンを追加
 		const ribbonIconEl = this.addRibbonIcon('message-square', 'Talk AI', async (evt: MouseEvent) => {
@@ -292,6 +291,25 @@ export default class TalkAIPlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
+
+	async loadModelOptions() {
+		try {
+			const adapter = this.app.vault.adapter;
+			const pluginDir = this.manifest.dir;
+			if (pluginDir) {
+				const filePath = `${pluginDir}/modelOptions.json`;
+				const content = await adapter.read(filePath);
+				this.modelOptions = JSON.parse(content);
+			}
+		} catch (error) {
+			console.error('Failed to load modelOptions.json:', error);
+			// デフォルトのモデルオプションを設定
+			this.modelOptions = {
+				'gpt-5.2': 'gpt-5.2',
+				'gpt-5.2-pro': 'gpt-5.2-pro'
+			};
+		}
+	}
 }
 
 class TalkAISettingTab extends PluginSettingTab {
@@ -326,10 +344,10 @@ class TalkAISettingTab extends PluginSettingTab {
 			.setName('AIモデル')
 			.setDesc('使用するAIモデルを選択してください')
 			.addDropdown(dropdown => {
-				// 選択肢を追加
-				AI_MODELS.forEach(model => {
-					dropdown.addOption(model.value, model.label);
-				});
+				// modelOptions.json から選択肢を追加
+				for (const [value, label] of Object.entries(this.plugin.modelOptions)) {
+					dropdown.addOption(value, label);
+				}
 
 				// 現在の値を設定
 				dropdown.setValue(this.plugin.settings.aiModel);
