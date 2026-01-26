@@ -42,6 +42,15 @@ export default class TalkAIPlugin extends Plugin {
 			}
 		});
 
+		// 直前の会話を削除するコマンド
+		this.addCommand({
+			id: 'delete-last-conversation',
+			name: '直前の会話を削除',
+			editorCallback: async (editor: Editor, view: MarkdownView) => {
+				await this.deleteLastConversation();
+			}
+		});
+
 		// 設定タブを追加
 		this.addSettingTab(new TalkAISettingTab(this.app, this));
 	}
@@ -111,6 +120,23 @@ export default class TalkAIPlugin extends Plugin {
 			editor.replaceRange(`\nエラーが発生しました: ${error.message}\n`, { line: answerStartLine, ch: 0 });
 			new Notice('エラーが発生しました');
 		}
+	}
+
+	/**
+	 * 直前の会話ペア(Q-A)を削除し、その前の質問に対する回答を入力できる状態に戻す
+	 * 例: Q1->A1->Q2 の状態で実行すると Q1->A(空) の状態に戻る
+	 */
+	async deleteLastConversation() {
+		// TODO: 実装予定
+		// 1. アクティブなエディタを取得
+		// 2. エディタの内容を取得
+		// 3. parseConversation() で会話履歴を解析
+		// 4. 削除可能かチェック（history が空なら削除不可）
+		// 5. 最後の Q-A ペアを削除した新しい履歴を構築
+		// 6. 新しいエディタの内容を生成
+		// 7. エディタの内容を更新
+		// 8. 成功通知を表示
+		throw new Error('Not implemented');
 	}
 
 	/**
