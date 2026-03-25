@@ -258,45 +258,60 @@ export default class TalkAIPlugin extends Plugin {
 		const decoder = new TextDecoder();
 		let accumulatedText = '';
 		let currentLine = startLine;
+		// チャンク境界で分断されたSSE行の前半を保持するバッファ
+		let sseBuffer = '';
+
+		// SSEの1行を処理する関数
+		const processSseLine = (line: string) => {
+			if (line.trim() === '') return;
+			if (line.trim() === 'data: [DONE]') return;
+
+			if (line.startsWith('data: ')) {
+				try {
+					const jsonData = JSON.parse(line.substring(6));
+					const content = jsonData.choices[0]?.delta?.content;
+
+					if (content) {
+						accumulatedText += content;
+
+						// エディタに追加
+						editor.replaceRange(
+							content,
+							{ line: currentLine, ch: editor.getLine(currentLine).length }
+						);
+
+						// 改行が含まれている場合は行数を更新
+						const newlineCount = (content.match(/\n/g) || []).length;
+						currentLine += newlineCount;
+					}
+				} catch (e) {
+					// JSONパースエラーは無視
+					console.error('Failed to parse JSON:', e);
+				}
+			}
+		};
 
 		try {
 			while (true) {
 				const { done, value } = await reader.read();
 
 				if (done) {
+					// ストリーム終了後、バッファに残存するデータを処理
+					if (sseBuffer.trim() !== '') {
+						processSseLine(sseBuffer);
+					}
 					break;
 				}
 
 				const chunk = decoder.decode(value, { stream: true });
-				const lines = chunk.split('\n');
+				// 前回の未完了行とチャンクを結合してから行分割する
+				const rawLines = (sseBuffer + chunk).split('\n');
+				// 最後の要素は改行で終わっていない可能性があるためバッファに退避
+				sseBuffer = rawLines.pop() ?? '';
+				const lines = rawLines;
 
 				for (const line of lines) {
-					if (line.trim() === '') continue;
-					if (line.trim() === 'data: [DONE]') continue;
-
-					if (line.startsWith('data: ')) {
-						try {
-							const jsonData = JSON.parse(line.substring(6));
-							const content = jsonData.choices[0]?.delta?.content;
-
-							if (content) {
-								accumulatedText += content;
-
-								// エディタに追加
-								editor.replaceRange(
-									content,
-									{ line: currentLine, ch: editor.getLine(currentLine).length }
-								);
-
-								// 改行が含まれている場合は行数を更新
-								const newlineCount = (content.match(/\n/g) || []).length;
-								currentLine += newlineCount;
-							}
-						} catch (e) {
-							// JSONパースエラーは無視
-							console.error('Failed to parse JSON:', e);
-						}
-					}
+					processSseLine(line);
 				}
 			}
 
