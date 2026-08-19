@@ -4,12 +4,14 @@ interface TalkAISettings {
 	openAIApiKey: string;
 	aiModel: string;
 	systemPrompt: string;
+	enableWebSearch: boolean;
 }
 
 const DEFAULT_SETTINGS: TalkAISettings = {
 	openAIApiKey: '', // ここにAPIキーを設定してください
 	aiModel: 'gpt-5.2', // デフォルトは gpt-5.2
-	systemPrompt: '' // デフォルトは空
+	systemPrompt: '', // デフォルトは空
+	enableWebSearch: false // デフォルトはWeb検索無効
 }
 
 // モデルオプションの型定義
@@ -111,8 +113,13 @@ export default class TalkAIPlugin extends Plugin {
 		try {
 			new Notice('AIに問い合わせ中...');
 
-			// OpenAI APIを使用してストリーミングで回答を取得
-			await this.streamOpenAIResponse(editor, answerStartLine, history, newQuestion);
+			// Web検索(Function Calling)が有効な場合はResponses APIを、
+			// 無効な場合は従来のChat Completions APIを使用する
+			if (this.settings.enableWebSearch) {
+				await this.streamOpenAIResponsesAPI(editor, answerStartLine, history, newQuestion);
+			} else {
+				await this.streamOpenAIResponse(editor, answerStartLine, history, newQuestion);
+			}
 
 			new Notice('回答が完了しました');
 		} catch (error) {
@@ -325,6 +332,175 @@ export default class TalkAIPlugin extends Plugin {
 		}
 	}
 
+	/**
+	 * OpenAI Responses APIを使用し、web_searchツール(Function Calling)経由で
+	 * モデルが必要と判断した場合にのみインターネット検索を行いつつ、
+	 * ストリーミングで回答を取得する
+	 */
+	async streamOpenAIResponsesAPI(
+		editor: Editor,
+		startLine: number,
+		history: ConversationMessage[],
+		newQuestion: string
+	) {
+		const input: Array<{role: 'user' | 'assistant', content: string}> = [];
+
+		// 会話履歴を追加
+		input.push(...history.map(msg => ({
+			role: msg.role,
+			content: msg.content
+		})));
+
+		// 新しい質問を追加
+		input.push({
+			role: 'user',
+			content: newQuestion
+		});
+
+		const requestBody: Record<string, unknown> = {
+			model: this.settings.aiModel,
+			input: input,
+			tools: [{ type: 'web_search' }],
+			tool_choice: 'auto',
+			stream: true
+		};
+
+		if (this.settings.systemPrompt && this.settings.systemPrompt.trim() !== '') {
+			requestBody.instructions = this.settings.systemPrompt;
+		}
+
+		const response = await fetch('https://api.openai.com/v1/responses', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'Authorization': `Bearer ${this.settings.openAIApiKey}`
+			},
+			body: JSON.stringify(requestBody)
+		});
+
+		if (!response.ok) {
+			throw new Error(`API request failed: ${response.status} ${response.statusText}`);
+		}
+
+		const reader = response.body?.getReader();
+		if (!reader) {
+			throw new Error('Response body is not readable');
+		}
+
+		const decoder = new TextDecoder();
+		let currentLine = startLine;
+		// チャンク境界で分断されたSSE行の前半を保持するバッファ
+		let sseBuffer = '';
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		let finalResponse: any = null;
+
+		// SSEの1行を処理する関数
+		const processSseLine = (line: string) => {
+			if (!line.startsWith('data: ')) return;
+
+			const dataStr = line.substring(6).trim();
+			if (dataStr === '' || dataStr === '[DONE]') return;
+
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			let event: any;
+			try {
+				event = JSON.parse(dataStr);
+			} catch (e) {
+				// JSONパースエラーは無視
+				console.error('Failed to parse JSON:', e);
+				return;
+			}
+
+			if (event.type === 'response.output_text.delta') {
+				const delta: string = event.delta;
+				if (delta) {
+					editor.replaceRange(
+						delta,
+						{ line: currentLine, ch: editor.getLine(currentLine).length }
+					);
+
+					const newlineCount = (delta.match(/\n/g) || []).length;
+					currentLine += newlineCount;
+				}
+			} else if (event.type === 'response.completed') {
+				finalResponse = event.response;
+			} else if (event.type === 'error') {
+				throw new Error(event.error?.message || 'Responses APIでエラーが発生しました');
+			}
+		};
+
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+
+				if (done) {
+					// ストリーム終了後、バッファに残存するデータを処理
+					if (sseBuffer.trim() !== '') {
+						processSseLine(sseBuffer);
+					}
+					break;
+				}
+
+				const chunk = decoder.decode(value, { stream: true });
+				// 前回の未完了行とチャンクを結合してから行分割する
+				const rawLines = (sseBuffer + chunk).split('\n');
+				// 最後の要素は改行で終わっていない可能性があるためバッファに退避
+				sseBuffer = rawLines.pop() ?? '';
+
+				for (const line of rawLines) {
+					processSseLine(line);
+				}
+			}
+
+			// Web検索が行われた場合、参照元をリンク付きで末尾に追加
+			const citations = this.extractCitations(finalResponse);
+			if (citations.length > 0) {
+				const citationText = '\n\n**参照:**\n' + citations.map(c => `- [${c.title || c.url}](${c.url})`).join('\n');
+				editor.replaceRange(
+					citationText,
+					{ line: currentLine, ch: editor.getLine(currentLine).length }
+				);
+				currentLine += (citationText.match(/\n/g) || []).length;
+			}
+
+			// ストリーミング完了後、次の質問を促すために # Q を追加
+			editor.replaceRange(
+				'\n\n---\n\n# Q\n',
+				{ line: currentLine, ch: editor.getLine(currentLine).length }
+			);
+		} finally {
+			reader.releaseLock();
+		}
+	}
+
+	/**
+	 * Responses APIのレスポンスからweb_search由来の引用元URLを抽出する
+	 */
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	private extractCitations(response: any): Array<{url: string, title?: string}> {
+		const citations: Array<{url: string, title?: string}> = [];
+		const seen = new Set<string>();
+
+		if (!response?.output) return citations;
+
+		for (const item of response.output) {
+			if (item.type !== 'message' || !item.content) continue;
+
+			for (const part of item.content) {
+				if (!part.annotations) continue;
+
+				for (const annotation of part.annotations) {
+					if (annotation.type === 'url_citation' && annotation.url && !seen.has(annotation.url)) {
+						seen.add(annotation.url);
+						citations.push({ url: annotation.url, title: annotation.title });
+					}
+				}
+			}
+		}
+
+		return citations;
+	}
+
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 	}
@@ -399,6 +575,17 @@ class TalkAISettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				});
 			});
+
+		// Web検索(Function Calling)設定
+		new Setting(containerEl)
+			.setName('Web検索を有効にする')
+			.setDesc('AIが必要と判断した場合にFunction Calling経由でインターネット検索を行い、その結果を参照して回答します(OpenAI Responses APIを使用)')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableWebSearch)
+				.onChange(async (value) => {
+					this.plugin.settings.enableWebSearch = value;
+					await this.plugin.saveSettings();
+				}));
 
 		// システムプロンプト設定
 		new Setting(containerEl)
