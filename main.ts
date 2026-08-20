@@ -422,6 +422,8 @@ export default class TalkAIPlugin extends Plugin {
 					const newlineCount = (delta.match(/\n/g) || []).length;
 					currentLine += newlineCount;
 				}
+			} else if (event.type === 'response.web_search_call.in_progress') {
+				new Notice('Web検索中...');
 			} else if (event.type === 'response.completed') {
 				finalResponse = event.response;
 			} else if (event.type === 'error') {
